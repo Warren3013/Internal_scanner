@@ -1,6 +1,9 @@
 # Internal_scanner
 Scan SMB files for interesting data, run AD scans and attacks
 
+# Tools
+impacket and SMBConnection
+
 # Installation
 pip install impacket --break-system-packages
 
