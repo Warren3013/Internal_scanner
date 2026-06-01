@@ -6,11 +6,11 @@ pip install impacket --break-system-packages
 
 # Usage
  # Anonymous only
-  python smb_scanner.py 192.168.1.10
+  python internal_scanner.py 192.168.1.10
 
   # Authenticated (domain optional)
-  python smb_scanner.py 192.168.1.10 -u admin -p 'P@ssw0rd' -d CORP
+  python internal_scanner.py 192.168.1.10 -u admin -p 'P@ssw0rd' -d CORP
 
   # Scan specific shares only
-  python smb_scanner.py 192.168.1.10 -u admin -p 'P@ssw0rd' -s Finance HR
+  python internal_scanner.py 192.168.1.10 -u admin -p 'P@ssw0rd' -s Finance HR
 
